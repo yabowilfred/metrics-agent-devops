@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 env:
-  IMAGE_NAME: yabowilfred/metrics-agent
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/metrics-agent
 
 jobs:
   build-test-push:
