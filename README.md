@@ -1,239 +1,71 @@
-# System Metrics Agent
+# System Metrics Agent — Conteneurisation, Compose et CI/CD
 
-Un agent Python modulaire capable de collecter les métriques système,
-de les formater et de les transmettre en temps réel vers une API ou un
-Webhook externe.
+Projet réalisé dans le cadre du cours « Éléments du DevOps » (Master).
+Dépôt : https://github.com/yabowilfred/metrics-agent-devops
 
-## Fonctionnalités
+## 1. Présentation et architecture
+Agent Python (psutil) qui collecte CPU / RAM / charge système et envoie les métriques en HTTP
+à une API FastAPI. Deux services, **une seule image Docker** :
 
-- Collecte du pourcentage CPU.
-- Collecte de la mémoire RAM totale, utilisée et disponible.
-- Utilisation de `psutil`.
-- Utilisation de **`subprocess`** pour exécuter la commande système
-  `uptime` et récupérer la charge système.
-- Architecture modulaire :
-  - `collector.py` : collecte ;
-  - `formatter.py` : normalisation du payload ;
-  - `sender.py` : envoi HTTP ;
-  - `agent.py` : orchestration ;
-  - `api.py` : API de réception avec **FastAPI**.
-- Configuration externe avec `.env`.
-- Gestion des erreurs réseau et des erreurs de collecte.
-- Tests automatisés avec `pytest`.
+- `api` : `uvicorn app.api:app` (port 8000), routes `/health`, `/metrics`, `/metrics/latest`
+- `agent` : `python -m app.agent`, envoie vers `http://api:8000/metrics` via le réseau `metrics-net`
 
-## Architecture
-
-```text
-system_metrics_agent/
-├── app/
-│   ├── __init__.py
-│   ├── agent.py
-│   ├── api.py
-│   ├── collector.py
-│   ├── config.py
-│   ├── formatter.py
-│   └── sender.py
-├── tests/
-│   ├── test_api.py
-│   ├── test_collector.py
-│   ├── test_formatter.py
-│   └── test_sender.py
-├── .env.example
-├── requirements.txt
-└── README.md
+```
+[agent] --POST /metrics--> [api] <-- GET /health, /metrics/latest
+        (réseau Docker metrics-net)
 ```
 
-## Installation
+## 2. Prérequis
+Docker, Docker Compose v2, Git, un compte GitHub et un compte Docker Hub.
 
-Créer un environnement virtuel :
-
-```bash
-python -m venv .venv
-```
-
-Linux/macOS :
-
-```bash
-source .venv/bin/activate
-```
-
-Windows :
-
-```powershell
-.venv\Scripts\Activate.ps1
-```
-
-Installer les dépendances :
-
-```bash
-pip install -r requirements.txt
-```
-
-Créer le fichier de configuration :
-
+## 3. Lancer en développement (Dockerfile.dev)
 ```bash
 cp .env.example .env
+docker compose up --build        # docker-compose.override.yml chargé automatiquement (hot-reload)
+docker build -f Dockerfile.dev -t metrics-agent:dev .
+docker run --rm -v "$(pwd):/app" metrics-agent:dev pytest -q
 ```
 
-Sous Windows, copier manuellement `.env.example` en `.env`.
-
-## Démarrer l'API FastAPI
-
+## 4. Lancer en production
+Build local de l'image de production :
 ```bash
-uvicorn app.api:app --reload
+docker compose -f docker-compose.yaml -f docker-compose.build.yaml up --build -d
 ```
-
-L'API est alors disponible sur :
-
-```text
-http://127.0.0.1:8000
-```
-
-Documentation interactive FastAPI :
-
-```text
-http://127.0.0.1:8000/docs
-```
-
-## Démarrer l'agent
-
-Dans un deuxième terminal :
-
+Depuis Docker Hub (sans build, sans code source) :
 ```bash
-python -m app.agent
+docker compose -f docker-compose.yaml pull
+docker compose -f docker-compose.yaml up -d
+docker compose ps
+curl http://localhost:8000/health
+curl http://localhost:8000/metrics/latest
 ```
 
-L'agent collecte les métriques selon l'intervalle défini dans `.env`
-puis les envoie automatiquement vers `METRICS_ENDPOINT`.
+## 5. Pipeline CI/CD
+Fichier `.github/workflows/ci-cd.yml`, déclenché sur push et pull request vers `main` :
+checkout → build de l'image de production → tests pytest → login Docker Hub → push (`latest` + SHA du commit).
+Le login et le push n'ont lieu que sur un push vers `main`, et seulement si les tests passent.
+Secret requis : `DOCKERHUB_TOKEN` (access token Docker Hub, droits Read & Write).
 
-## Exemple de configuration
+![Pipeline vert](docs/pipeline-vert.png)
+![Pipeline rouge sur une PR avec un test volontairement faux](docs/pipeline-rouge.png)
+![Détail : le test en échec bloque le login et le push](docs/pipeline-rouge-detail.png)
 
-```env
-METRICS_ENDPOINT=http://127.0.0.1:8000/metrics
-COLLECTION_INTERVAL=5
-REQUEST_TIMEOUT=5
-```
+## 6. Images Docker Hub
+https://hub.docker.com/r/yabowilfred/metrics-agent (tags `latest` et SHA du commit, 65,21 Mo compressée)
 
-Pour envoyer vers un webhook externe, remplacer simplement :
+![Tags Docker Hub](docs/dockerhub-tags.png)
 
-```env
-METRICS_ENDPOINT=https://example.com/webhook
-```
+## 7. Choix techniques et difficultés
+- Base `python:3.12-slim` : légère et compatible avec les wheels de psutil.
+- Image unique pour `api` et `agent` (commande surchargée dans Compose) : un seul artefact versionné, versions alignées.
+- Multi-stage : les dépendances sont installées dans un venv copié dans l'image finale (pas de pytest ni d'outils de build en production). Utilisateur non-root (uid 10001), HEALTHCHECK en Python (pas de curl dans l'image slim).
+- `procps` installé car `collector.py` appelle la commande `uptime`, absente de l'image slim.
+- La suite de tests n'était pas dans le dépôt fourni : ajout d'un test minimal sur `/health` et d'un `pytest.ini`.
+- Le HEALTHCHECK de l'image, prévu pour l'API, était hérité par le service agent et le marquait `unhealthy` : il est désactivé pour ce service dans `docker-compose.yaml`.
+- Entre conteneurs, `127.0.0.1` n'est plus valable : `METRICS_ENDPOINT` vaut `http://api:8000/metrics`. L'ordre de démarrage est géré par `depends_on` avec `condition: service_healthy`.
+- Plusieurs erreurs de pipeline corrigées pas à pas (nom d'image vide, secret manquant, token en lecture seule) : visibles dans l'historique des runs.
+- Secrets : jamais committés (`.env` ignoré, `.env.example` seul versionné, token dans les secrets GitHub).
 
-## Exemple de métrique envoyée
-
-```json
-{
-  "agent": "system-metrics-agent",
-  "event_type": "system_metrics",
-  "data": {
-    "timestamp": "2026-08-27T12:00:00.000000+00:00",
-    "hostname": "server-01",
-    "cpu": {
-      "percent": 23.4,
-      "logical_cores": 8
-    },
-    "memory": {
-      "total_bytes": 16777216000,
-      "available_bytes": 8000000000,
-      "used_bytes": 7777216000,
-      "percent": 48.2
-    },
-    "system": {
-      "load_1m": 0.12,
-      "load_5m": 0.18,
-      "load_15m": 0.20
-    }
-  }
-}
-```
-
-## Endpoints
-
-### Vérifier l'état de l'API
-
-```http
-GET /health
-```
-
-Réponse :
-
-```json
-{
-  "status": "ok"
-}
-```
-
-### Envoyer des métriques
-
-```http
-POST /metrics
-```
-
-### Récupérer la dernière métrique
-
-```http
-GET /metrics/latest
-```
-
-## Tests
-
-Exécuter toute la suite :
-
-```bash
-pytest -q
-```
-
-Exécuter avec une couverture de code nécessite l'installation de
-`pytest-cov` :
-
-```bash
-pip install pytest-cov
-pytest --cov=app --cov-report=term-missing
-```
-
-## Robustesse
-
-Le projet gère notamment :
-
-- les erreurs d'exécution de `subprocess` ;
-- les timeouts ;
-- les erreurs de connexion HTTP ;
-- les réponses HTTP en erreur ;
-- les configurations invalides ;
-- les payloads incomplets ;
-- l'absence de métriques dans l'API.
-
-## Démonstration du flux
-
-```text
-┌──────────────────┐
-│ Système          │
-│ CPU / RAM        │
-└────────┬─────────┘
-         │
-         ▼
-┌──────────────────┐
-│ collector.py     │
-│ psutil           │
-│ subprocess       │
-└────────┬─────────┘
-         │
-         ▼
-┌──────────────────┐
-│ formatter.py     │
-│ Payload JSON     │
-└────────┬─────────┘
-         │
-         ▼
-┌──────────────────┐
-│ sender.py        │
-│ HTTP POST        │
-└────────┬─────────┘
-         │
-         ▼
-┌──────────────────┐
-│ FastAPI          │
-│ /metrics         │
-└──────────────────┘
-```
+## 8. Preuves de fonctionnement
+![Conteneurs actifs](docs/compose-ps.png)
+![Appels /health et /metrics/latest](docs/health-metrics.png)
