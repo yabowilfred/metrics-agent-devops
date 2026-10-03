@@ -21,6 +21,8 @@ services:
     image: ${DOCKERHUB_USERNAME}/metrics-agent:latest
     container_name: metrics-agent
     command: ["app.agent"]
+    healthcheck:
+      disable: true
     env_file: .env
     environment:
       METRICS_ENDPOINT: http://api:8000/metrics
