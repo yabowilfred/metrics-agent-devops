@@ -1,0 +1,10 @@
+# Build local de l'image de production
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile

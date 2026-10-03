@@ -1,0 +1,36 @@
+name: metrics-agent
+
+services:
+  api:
+    image: ${DOCKERHUB_USERNAME}/metrics-agent:latest
+    container_name: metrics-api
+    env_file: .env
+    ports:
+      - "8000:8000"
+    networks:
+      - metrics-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  agent:
+    image: ${DOCKERHUB_USERNAME}/metrics-agent:latest
+    container_name: metrics-agent
+    command: ["app.agent"]
+    env_file: .env
+    environment:
+      METRICS_ENDPOINT: http://api:8000/metrics
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - metrics-net
+    restart: unless-stopped
+
+networks:
+  metrics-net:
+    driver: bridge
